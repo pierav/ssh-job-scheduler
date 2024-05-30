@@ -15,13 +15,93 @@
 /********************************************************************
  * Configuration
  ********************************************************************/
-char *hosts[] = {"calc11", "calc12", "calc14", "calc15", "calc16", "calc17",
-                 "calc18", "calc19", "calc20", "calc21", "calc22", "calc23",
-                 "calc24", "calc25", "calc26", "calc27", "calc28"};
-#define NB_HOSTS_MAX 17
-#define NB_HOSTS NB_HOSTS_MAX
 
 #define MYSSH_CHANNEL_PER_SESSION 8
+
+/********************************************************************
+ * Defines
+ ********************************************************************/
+
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+#define handle_error_en(en, msg) \
+    do {                         \
+        errno = en;              \
+        perror(msg);             \
+        exit(EXIT_FAILURE);      \
+    } while (0)
+
+#define handle_error(msg)                             \
+    do {                                              \
+        perror(msg);                                  \
+        fprintf(stderr, "*** PANIC ***: " #msg "\n"); \
+        exit(EXIT_FAILURE);                           \
+    } while (0)
+
+#define handle_assert(cond, msg) \
+    do {                         \
+        if (!cond) {             \
+            handle_error(msg);   \
+        }                        \
+    } while (0)
+
+/********************************************************************
+ * Misc
+ ********************************************************************/
+
+char **read_file(char *filename, size_t *size) {
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    FILE *fp = fopen(filename, "r");
+    handle_assert(fp, "fopen");
+
+    // Read number of lines
+    *size = 0;
+    while ((read = getline(&line, &len, fp)) != -1) {
+        *size += 1;
+    }
+    printf("Got %ld lines\n", *size);
+
+    // Allocate jobs buffer
+    char **ret = calloc(*size, sizeof(char *));
+    handle_assert(ret, "calloc");
+
+    // Read again
+    rewind(fp);
+    size_t i = 0;
+    while ((read = getline(&line, &len, fp)) != -1) {
+        ret[i] = strdup(line);
+        for (char *c = ret[i]; *c != '\0'; c++) {
+            if (*c == '\n') {
+                *c = '\0';
+                break;
+            }
+        }
+        i++;
+    }
+
+    // Close file
+    if (line) {
+        free(line);
+    }
+    fclose(fp);
+
+    // Dump
+    for (size_t j = 0; j < *size; j++) {
+        printf("item %ld : %s\n", j, ret[j]);
+    }
+    return ret;
+}
+
+/********************************************************************
+ * Hosts
+ ********************************************************************/
+
+char **hosts;
+size_t NB_HOSTS = 0;
+
+void hosts_init() { hosts = read_file("hosts.txt", &NB_HOSTS); }
 
 /********************************************************************
  * Arguments
@@ -69,33 +149,6 @@ struct arguments *parse_args(int argc, char **argv) {
 }
 
 /********************************************************************
- * Defines
- ********************************************************************/
-
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-
-#define handle_error_en(en, msg) \
-    do {                         \
-        errno = en;              \
-        perror(msg);             \
-        exit(EXIT_FAILURE);      \
-    } while (0)
-
-#define handle_error(msg)                             \
-    do {                                              \
-        perror(msg);                                  \
-        fprintf(stderr, "*** PANIC ***: " #msg "\n"); \
-        exit(EXIT_FAILURE);                           \
-    } while (0)
-
-#define handle_assert(cond, msg) \
-    do {                         \
-        if (!cond) {             \
-            handle_error(msg);   \
-        }                        \
-    } while (0)
-
-/********************************************************************
  * Jobs
  ********************************************************************/
 
@@ -107,47 +160,7 @@ bool job_list_debug_mode = false;
 char *job_list_debug_job = "sleep 10";
 
 void jobs_init(char *filename) {
-    char *line = NULL;
-    size_t len = 0;
-    ssize_t read;
-    FILE *fp = fopen(filename, "r");
-    handle_assert(fp, "fopen");
-
-    // Read number of lines
-    jobs_list_size = 0;
-    while ((read = getline(&line, &len, fp)) != -1) {
-        jobs_list_size++;
-    }
-    printf("Got %ld jobs\n", jobs_list_size);
-
-    // Allocate jobs buffer
-    jobs_list = calloc(jobs_list_size, sizeof(char *));
-    handle_assert(jobs_list, "calloc");
-
-    // Read again
-    rewind(fp);
-    size_t i = 0;
-    while ((read = getline(&line, &len, fp)) != -1) {
-        jobs_list[i] = strdup(line);
-        for (char *c = jobs_list[i]; *c != '\0'; c++) {
-            if (*c == '\n') {
-                *c = '\0';
-                break;
-            }
-        }
-        i++;
-    }
-
-    // Close file
-    if (line) {
-        free(line);
-    }
-    fclose(fp);
-
-    // Dump
-    for (size_t j = 0; j < jobs_list_size; j++) {
-        printf("Job %ld : %s\n", j, jobs_list[j]);
-    }
+    jobs_list = read_file(filename, &jobs_list_size);
 }
 
 int jobs_get(char **job) {
@@ -411,7 +424,7 @@ bool context_tick(thread_info_t *info, size_t *number_jobs_done) {
                     handle_error_en(rc, "ssh_channel_request_shell");
 
                 char *exit_cmd = "; exit";
-                int nbytes = strlen(job) + strlen(exit_cmd) + 1;
+                size_t nbytes = strlen(job) + strlen(exit_cmd) + 1;
                 char buffcmd[4096];
                 assert(nbytes < sizeof(buffcmd));
                 snprintf(buffcmd, sizeof(buffcmd), "%s%s\n", job, exit_cmd);
@@ -421,7 +434,7 @@ bool context_tick(thread_info_t *info, size_t *number_jobs_done) {
 
                 int nwritten =
                     ssh_channel_write(info->channel, buffcmd, nbytes);
-                if (nwritten != nbytes)
+                if ((size_t)nwritten != nbytes)
                     handle_error_en(rc, "ssh_channel_write");
 
                 // rc = ssh_channel_request_exec(info->channel, job);
@@ -490,9 +503,14 @@ int main(int argc, char **argv) {
         printf("No jobs, switch to test mode\n");
     }
 
+    /* Parse hosts */
+    printf("*** Parse hosts.txt ***");
+    hosts_init();
+
     /* Probe hosts */
     printf("*** Probe hosts ...\n");
-    size_t hosts_cores[NB_HOSTS] = {0};
+    size_t *hosts_cores = calloc(sizeof(size_t), NB_HOSTS);
+    handle_assert(hosts_cores, "calloc");
     size_t total_cores = 0;
     for (size_t i = 0; i < NB_HOSTS; i++) {
         hosts_cores[i] = host_probe(hosts[i]);
